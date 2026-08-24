@@ -87,28 +87,28 @@ class Place::SecurityBookingCheckin < PlaceOS::Driver
   getter check_ins : UInt64 = 0_u64
   getter matched_users : UInt64 = 0_u64
 
-  @user_cache : Hash(String, String) = {} of String => String
+  @user_cache : Hash(String, Array(String)) = {} of String => Array(String)
 
-  def lookup_custom(id : String) : String?
+  def lookup_custom(id : String) : Array(String)
     if cached = @user_cache[id]?
       return cached
     end
 
-    user = begin
+    users = begin
       with_retry("user lookup of #{id} via #{@custom_field}") do
         directory.list_users(
           filter: "#{@custom_field} eq '#{id}'",
           additional_fields: {@custom_field},
-        ).get.as_a.first?
+        ).get.as_a
       end
     rescue
-      nil
+      return [] of String
     end
 
-    if user
-      email = user["username"].as_s
-      @user_cache[id] = email.strip.downcase
-    end
+    
+    emails = users.map { |user| user["username"].as_s.strip.downcase }
+    @user_cache[id] = emails unless users.empty?
+    emails
   end
 
   @[Security(Level::Administrator)]
@@ -133,49 +133,49 @@ class Place::SecurityBookingCheckin < PlaceOS::Driver
     if user_email = event.user_email.presence
       # NOTE:: `email` is captured by the retry closures below, so it must only
       # ever be assigned a String (closured variables are not flow-typed)
-      email = user_email
+      emails = [user_email]
       if @custom_field.presence
-        actual_email = lookup_custom(user_email)
-        return unless actual_email
-        email = actual_email
+        emails = lookup_custom(user_email)
         @matched_users += 1_u64
       else
         staff_user = begin
-          with_retry("user lookup of #{email}") { staff_api.user(email.strip.downcase).get }
+          with_retry("user lookup of #{user_email}") { staff_api.user(user_email.strip.downcase).get }
         rescue
           nil
         end
         if staff_user
-          email = staff_user["email"].as_s
+          emails = [staff_user["email"].as_s]
           @matched_users += 1_u64
         end
       end
 
       @booking_types.each do |booking_type|
-        # find any bookings that user may have
-        bookings = with_retry("#{booking_type} booking query for #{email}") do
-          staff_api.query_bookings(now.to_unix, end_of_day.to_unix, zones: {building}, type: booking_type, email: email).get.as_a
-        end
-        logger.debug { "found #{bookings.size} of #{booking_type} for #{email}" }
-
-        bookings.each do |booking|
-          if booking["asset_id"].as_s.starts_with?("unallocated")
-            logger.debug { "  --  skipping #{booking_type} for #{email} as unallocated" }
-            next
+        emails.each do |email|
+          # find any bookings that user may have
+          bookings = with_retry("#{booking_type} booking query for #{email}") do
+            staff_api.query_bookings(now.to_unix, end_of_day.to_unix, zones: {building}, type: booking_type, email: email).get.as_a
           end
+          logger.debug { "found #{bookings.size} of #{booking_type} for #{email}" }
 
-          if !booking["checked_in"].as_bool?
-            logger.debug { "  --  checking in #{booking_type} for #{email}" }
-            begin
-              with_retry("#{booking_type} check in for #{email}") do
-                staff_api.booking_check_in(booking["id"], true, "security-access", instance: booking["instance"]?).get
-              end
-              @check_ins += 1_u64
-            rescue error
-              logger.warn(exception: error) { "failed to check in #{booking_type} booking #{booking["id"]} for #{email}" }
+          bookings.each do |booking|
+            if booking["asset_id"].as_s.starts_with?("unallocated")
+              logger.debug { "  --  skipping #{booking_type} for #{email} as unallocated" }
+              next
             end
-          else
-            logger.debug { "  --  skipping #{booking_type} for #{email} as already checked-in" }
+
+            if !booking["checked_in"].as_bool?
+              logger.debug { "  --  checking in #{booking_type} for #{email}" }
+              begin
+                with_retry("#{booking_type} check in for #{email}") do
+                  staff_api.booking_check_in(booking["id"], true, "security-access", instance: booking["instance"]?).get
+                end
+                @check_ins += 1_u64
+              rescue error
+                logger.warn(exception: error) { "failed to check in #{booking_type} booking #{booking["id"]} for #{email}" }
+              end
+            else
+              logger.debug { "  --  skipping #{booking_type} for #{email} as already checked-in" }
+            end
           end
         end
       end
