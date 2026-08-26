@@ -16,6 +16,12 @@ DISPLAY  = "drivers_place_demo_display_4894a36_arm64"
 BOOKINGS = "drivers_place_bookings_1a2b3c4_arm64"
 ROUTER   = "drivers_place_router_9f8e7d6_arm64"
 
+# a driver binary that wasn't named by the build service
+LEGACY = "legacy_driver"
+
+# :nodoc:
+alias DriverState = NamedTuple(name: String, hostname: String, driver: String, commit: String, running: Int32, timestamp: Int64)
+
 # :nodoc:
 def system_load(hostname : String)
   {
@@ -70,7 +76,7 @@ def serve_broken_core(port : Int32)
 end
 
 serve_core(CORE_0_PORT, "core-0", {DISPLAY => 12_345_i64, BOOKINGS => 0_i64})
-serve_core(CORE_1_PORT, "core-1", {ROUTER => nil})
+serve_core(CORE_1_PORT, "core-1", {ROUTER => nil, LEGACY => 6_789_i64})
 serve_broken_core(CORE_2_PORT)
 
 DriverSpecs.mock_driver "Place::DriverHealth" do
@@ -93,22 +99,35 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
 
   it "checks the memory use of every driver process in the cluster" do
     before = Time.utc.to_unix
-    results = Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
+    results = Array(DriverState)
       .from_json exec(:check_drivers).get.not_nil!.to_json
 
-    results.size.should eq 3
+    results.size.should eq 4
 
-    # a driver using memory is running
-    results[1][:name].should eq "core-0.#{DISPLAY}"
+    # a driver using memory is running, the commit and architecture are split
+    # out of the executable name
+    results[1][:name].should eq "core-0.drivers_place_demo_display"
+    results[1][:hostname].should eq "core-0"
+    results[1][:driver].should eq "drivers_place_demo_display"
+    results[1][:commit].should eq "4894a36"
     results[1][:running].should eq 1
 
     # a driver using no memory is not
-    results[0][:name].should eq "core-0.#{BOOKINGS}"
+    results[0][:name].should eq "core-0.drivers_place_bookings"
+    results[0][:commit].should eq "1a2b3c4"
     results[0][:running].should eq 0
 
     # neither is one core has no status for
-    results[2][:name].should eq "core-1.#{ROUTER}"
+    results[2][:name].should eq "core-1.drivers_place_router"
+    results[2][:hostname].should eq "core-1"
+    results[2][:commit].should eq "9f8e7d6"
     results[2][:running].should eq 0
+
+    # an executable the build service didn't name is reported as is
+    results[3][:name].should eq "core-1.#{LEGACY}"
+    results[3][:driver].should eq LEGACY
+    results[3][:commit].should eq ""
+    results[3][:running].should eq 1
 
     # each result is stamped with when it was checked
     results.each do |result|
@@ -116,12 +135,12 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
       result[:timestamp].should be <= Time.utc.to_unix
     end
 
-    status[:driver_count].should eq 3
-    status[:running_count].should eq 1
+    status[:driver_count].should eq 4
+    status[:running_count].should eq 2
 
     Array(String).from_json(status[:not_running].to_json).should eq [
-      "core-0.#{BOOKINGS}",
-      "core-1.#{ROUTER}",
+      "core-0.drivers_place_bookings",
+      "core-1.drivers_place_router",
     ]
 
     Array(NamedTuple(id: String, name: String)).from_json(status[:clusters].to_json).should eq [
@@ -133,11 +152,11 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
     status[:last_checked].as_i64.should be >= before
 
     # the state matches what the function returned, shaped so the influx
-    # exporter tags each point with the driver name
+    # exporter tags each point with the driver name and node
     drivers = status[:drivers]
     drivers["ts_hint"].should eq "complex"
-    Array(String).from_json(drivers["ts_tag_keys"].to_json).should eq ["name"]
-    Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
+    Array(String).from_json(drivers["ts_tag_keys"].to_json).should eq ["name", "hostname"]
+    Array(DriverState)
       .from_json(drivers["value"].to_json).should eq results
   end
 
@@ -150,10 +169,10 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
       },
     })
 
-    results = Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
+    results = Array(DriverState)
       .from_json exec(:check_drivers).get.not_nil!.to_json
 
-    results.map(&.[](:name)).should eq ["core-0.#{BOOKINGS}", "core-0.#{DISPLAY}"]
+    results.map(&.[](:name)).should eq ["core-0.drivers_place_bookings", "core-0.drivers_place_demo_display"]
 
     Array(String).from_json(status[:unreachable_clusters].to_json).should eq [CORE_2_ID]
     Array(NamedTuple(id: String, name: String)).from_json(status[:clusters].to_json).should eq [

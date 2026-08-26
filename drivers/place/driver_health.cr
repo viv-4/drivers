@@ -31,11 +31,24 @@ class Place::DriverHealth < PlaceOS::Driver
   # check for minutes against a node that is down
   CORE_RETRIES = 2
 
+  # driver executables are named `<source path>_<short commit>_<arch>` by the
+  # build service, i.e. `drivers_place_bookings_4894a36_arm64`
+  EXECUTABLE_NAME = /\A(?<driver>.+)_(?<commit>[0-9a-f]{7})_(?<arch>[a-z0-9]+)\z/
+
   struct DriverState
     include JSON::Serializable
 
-    # `<node hostname>.<driver>`
+    # `<hostname>.<driver>`, unique across the cluster
     getter name : String
+
+    # the core node the driver process is on, i.e. `core-0`
+    getter hostname : String
+
+    # the driver source path, i.e. `drivers_place_bookings`
+    getter driver : String
+
+    # the short commit hash the driver was built from, i.e. `4894a36`
+    getter commit : String
 
     # 1 when the driver process was using memory when we asked, otherwise 0.
     # numeric rather than boolean so InfluxDB can aggregate it (mean, sum)
@@ -44,7 +57,15 @@ class Place::DriverHealth < PlaceOS::Driver
     # when the running state was checked, unix seconds
     getter timestamp : Int64
 
-    def initialize(@name, @running, @timestamp)
+    def initialize(@hostname, executable : String, @running, @timestamp)
+      if match = EXECUTABLE_NAME.match(executable)
+        @driver = match["driver"]
+        @commit = match["commit"]
+      else
+        @driver = executable
+        @commit = ""
+      end
+      @name = "#{@hostname}.#{@driver}"
     end
   end
 
@@ -97,11 +118,11 @@ class Place::DriverHealth < PlaceOS::Driver
 
     self[:clusters] = clusters
     self[:unreachable_clusters] = unreachable
-    # `name` is exposed as an InfluxDB tag so each driver is its own series
+    # exposed as InfluxDB tags so each driver process is its own series
     self[:drivers] = {
       value:       drivers,
       ts_hint:     "complex",
-      ts_tag_keys: ["name"],
+      ts_tag_keys: ["name", "hostname"],
     }
     self[:driver_count] = drivers.size
     self[:running_count] = drivers.size - not_running.size
@@ -121,7 +142,7 @@ class Place::DriverHealth < PlaceOS::Driver
       states = client.loaded.local.keys.map do |driver|
         # no status or no memory in use means the process isn't running
         memory = client.driver_status(driver).local.try(&.memory_usage) || 0_i64
-        DriverState.new("#{hostname}.#{driver}", memory.zero? ? 0 : 1, Time.utc.to_unix)
+        DriverState.new(hostname, driver, memory.zero? ? 0 : 1, Time.utc.to_unix)
       end
 
       {hostname, states}
