@@ -14,7 +14,7 @@ require "redis_service_manager"
 class Place::DriverHealth < PlaceOS::Driver
   descriptive_name "PlaceOS Driver Health"
   generic_name :DriverHealth
-  description %(Checks that the driver processes on every core node in the cluster are running, exposing a running state per driver for backoffice and InfluxDB)
+  description %(Checks that the driver processes on every core node in the cluster are running, exposing a running state (1 or 0) per driver for backoffice and InfluxDB)
 
   default_settings({
     # how often to check the cluster, set to 0 to only check on request
@@ -37,8 +37,9 @@ class Place::DriverHealth < PlaceOS::Driver
     # `<node hostname>.<driver>`
     getter name : String
 
-    # was the driver process using memory when we asked
-    getter running : Bool
+    # 1 when the driver process was using memory when we asked, otherwise 0.
+    # numeric rather than boolean so InfluxDB can aggregate it (mean, sum)
+    getter running : Int32
 
     # when the running state was checked, unix seconds
     getter timestamp : Int64
@@ -92,11 +93,16 @@ class Place::DriverHealth < PlaceOS::Driver
     end
 
     drivers.sort_by!(&.name)
-    not_running = drivers.reject(&.running).map(&.name)
+    not_running = drivers.select(&.running.zero?).map(&.name)
 
     self[:clusters] = clusters
     self[:unreachable_clusters] = unreachable
-    self[:drivers] = drivers
+    # `name` is exposed as an InfluxDB tag so each driver is its own series
+    self[:drivers] = {
+      value:       drivers,
+      ts_hint:     "complex",
+      ts_tag_keys: ["name"],
+    }
     self[:driver_count] = drivers.size
     self[:running_count] = drivers.size - not_running.size
     self[:not_running] = not_running
@@ -115,7 +121,7 @@ class Place::DriverHealth < PlaceOS::Driver
       states = client.loaded.local.keys.map do |driver|
         # no status or no memory in use means the process isn't running
         memory = client.driver_status(driver).local.try(&.memory_usage) || 0_i64
-        DriverState.new("#{hostname}.#{driver}", memory > 0, Time.utc.to_unix)
+        DriverState.new("#{hostname}.#{driver}", memory.zero? ? 0 : 1, Time.utc.to_unix)
       end
 
       {hostname, states}

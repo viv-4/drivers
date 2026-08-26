@@ -93,22 +93,22 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
 
   it "checks the memory use of every driver process in the cluster" do
     before = Time.utc.to_unix
-    results = Array(NamedTuple(name: String, running: Bool, timestamp: Int64))
+    results = Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
       .from_json exec(:check_drivers).get.not_nil!.to_json
 
     results.size.should eq 3
 
     # a driver using memory is running
     results[1][:name].should eq "core-0.#{DISPLAY}"
-    results[1][:running].should eq true
+    results[1][:running].should eq 1
 
     # a driver using no memory is not
     results[0][:name].should eq "core-0.#{BOOKINGS}"
-    results[0][:running].should eq false
+    results[0][:running].should eq 0
 
     # neither is one core has no status for
     results[2][:name].should eq "core-1.#{ROUTER}"
-    results[2][:running].should eq false
+    results[2][:running].should eq 0
 
     # each result is stamped with when it was checked
     results.each do |result|
@@ -132,9 +132,13 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
     Array(String).from_json(status[:unreachable_clusters].to_json).should be_empty
     status[:last_checked].as_i64.should be >= before
 
-    # the state matches what the function returned
-    Array(NamedTuple(name: String, running: Bool, timestamp: Int64))
-      .from_json(status[:drivers].to_json).should eq results
+    # the state matches what the function returned, shaped so the influx
+    # exporter tags each point with the driver name
+    drivers = status[:drivers]
+    drivers["ts_hint"].should eq "complex"
+    Array(String).from_json(drivers["ts_tag_keys"].to_json).should eq ["name"]
+    Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
+      .from_json(drivers["value"].to_json).should eq results
   end
 
   it "flags a node it can't reach and still checks the rest" do
@@ -146,7 +150,7 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
       },
     })
 
-    results = Array(NamedTuple(name: String, running: Bool, timestamp: Int64))
+    results = Array(NamedTuple(name: String, running: Int32, timestamp: Int64))
       .from_json exec(:check_drivers).get.not_nil!.to_json
 
     results.map(&.[](:name)).should eq ["core-0.#{BOOKINGS}", "core-0.#{DISPLAY}"]
