@@ -1,0 +1,144 @@
+require "placeos-driver"
+require "placeos-driver/proxy/remote_driver"
+require "placeos-core-client"
+require "redis_service_manager"
+
+# Reports whether the driver processes on every core node in the cluster are
+# running.
+#
+# Core nodes are discovered from the service registration that
+# `Proxy::RemoteDriver` already uses to route module requests, so no API key or
+# request to an external PlaceOS instance is required. Each node is then asked
+# about its own driver processes over core's internal API (`/api/core/v1`), the
+# same data rest-api aggregates for its `/cluster` routes.
+class Place::DriverHealth < PlaceOS::Driver
+  descriptive_name "PlaceOS Driver Health"
+  generic_name :DriverHealth
+  description %(Checks that the driver processes on every core node in the cluster are running, exposing a running state per driver for backoffice and InfluxDB)
+
+  default_settings({
+    # how often to check the cluster, set to 0 to only check on request
+    check_every_minutes: 5,
+
+    # optionally check a fixed set of core nodes, `node id => core URI`.
+    # the cluster is discovered when this is empty, which is what you want
+    # in a normal deployment
+    core_nodes: {} of String => String,
+  })
+
+  # attempts made against a core node before it's considered unreachable.
+  # the client default of 10 (with a 40 second max interval) would stall the
+  # check for minutes against a node that is down
+  CORE_RETRIES = 2
+
+  struct DriverState
+    include JSON::Serializable
+
+    # `<node hostname>.<driver>`
+    getter name : String
+
+    # was the driver process using memory when we asked
+    getter running : Bool
+
+    # when the running state was checked, unix seconds
+    getter timestamp : Int64
+
+    def initialize(@name, @running, @timestamp)
+    end
+  end
+
+  @check_every : Time::Span = 5.minutes
+  @core_nodes : Hash(String, URI) = {} of String => URI
+  @discovery : Clustering::Discovery? = nil
+
+  def on_load
+    on_update
+  end
+
+  def on_update
+    @check_every = (setting?(Int32, :check_every_minutes) || 5).minutes
+    @core_nodes = (setting?(Hash(String, String), :core_nodes) || {} of String => String)
+      .transform_values { |uri| URI.parse uri }
+
+    schedule.clear
+    return unless @check_every > Time::Span.zero
+
+    # let the cluster settle before the first check, drivers are still launching
+    # for a while after a core node starts
+    schedule.in(30.seconds) { check_drivers }
+    schedule.every(@check_every) { check_drivers }
+  end
+
+  # the core nodes that make up the cluster, `node id => core URI`
+  def cluster_nodes : Hash(String, String)
+    core_nodes.transform_values(&.to_s)
+  end
+
+  # checks every driver process on every core node in the cluster
+  def check_drivers : Array(DriverState)
+    clusters = [] of NamedTuple(id: String, name: String)
+    unreachable = [] of String
+    drivers = [] of DriverState
+
+    core_nodes.each do |id, uri|
+      begin
+        hostname, states = check_node uri
+        clusters << {id: id, name: hostname}
+        drivers.concat states
+      rescue error
+        logger.warn(exception: error) { "failed to query core node #{id} on #{uri}" }
+        unreachable << id
+      end
+    end
+
+    drivers.sort_by!(&.name)
+    not_running = drivers.reject(&.running).map(&.name)
+
+    self[:clusters] = clusters
+    self[:unreachable_clusters] = unreachable
+    self[:drivers] = drivers
+    self[:driver_count] = drivers.size
+    self[:running_count] = drivers.size - not_running.size
+    self[:not_running] = not_running
+    self[:last_checked] = Time.utc.to_unix
+
+    drivers
+  end
+
+  # returns the nodes hostname and the state of the drivers running on it
+  protected def check_node(uri : URI) : Tuple(String, Array(DriverState))
+    PlaceOS::Core::Client.client(uri, retries: CORE_RETRIES) do |client|
+      # the hostname of the pod, i.e. `core-0`
+      hostname = client.core_load.local.hostname
+
+      # a mapping of driver => the modules that driver is running
+      states = client.loaded.local.keys.map do |driver|
+        # no status or no memory in use means the process isn't running
+        memory = client.driver_status(driver).local.try(&.memory_usage) || 0_i64
+        DriverState.new("#{hostname}.#{driver}", memory > 0, Time.utc.to_unix)
+      end
+
+      {hostname, states}
+    end
+  end
+
+  # the configured nodes, otherwise the nodes registered in the cluster
+  protected def core_nodes : Hash(String, URI)
+    nodes = @core_nodes
+    return nodes unless nodes.empty?
+    discovery.node_hash
+  end
+
+  # reads the core service registration, the same one `Proxy::RemoteDriver` uses
+  # to work out which node is running a module. we only ever read from it, this
+  # process is not a member of the cluster
+  protected def discovery : Clustering::Discovery
+    @discovery ||= Clustering::Discovery.new(
+      RedisServiceManager.new(
+        service: PlaceOS::Driver::Proxy::RemoteDriver::CORE_NAMESPACE,
+        redis: PlaceOS::Driver::RedisStorage.shared_redis_client,
+        lock: PlaceOS::Driver::RedisStorage.redis_lock
+      )
+    )
+  end
+end
