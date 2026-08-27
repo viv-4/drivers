@@ -38,7 +38,7 @@ end
 LEGACY = "legacy_driver"
 
 # :nodoc:
-alias DriverState = NamedTuple(name: String, hostname: String, driver: String, commit: String, running: Int32, timestamp: Int64)
+alias DriverState = NamedTuple(name: String, hostname: String, commit: String, running: Int32, timestamp: Int64)
 
 # :nodoc:
 def system_load(hostname : String)
@@ -133,35 +133,36 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
 
     # a driver using memory is running, the commit and architecture are split
     # out of the executable name
-    results[1][:name].should eq "core-0.drivers_place_demo_display"
+    results[1][:name].should eq "drivers_place_demo_display"
     results[1][:hostname].should eq "core-0"
-    results[1][:driver].should eq "drivers_place_demo_display"
     results[1][:commit].should eq "4894a36"
     results[1][:running].should eq 1
 
     # a driver using no memory is not
-    results[0][:name].should eq "core-0.drivers_place_bookings"
+    results[0][:name].should eq "drivers_place_bookings"
+    results[0][:hostname].should eq "core-0"
     results[0][:commit].should eq "1a2b3c4"
     results[0][:running].should eq 0
 
     # neither is one core has no status for
-    results[2][:name].should eq "core-1.drivers_place_router"
+    results[2][:name].should eq "drivers_place_router"
     results[2][:hostname].should eq "core-1"
     results[2][:commit].should eq "9f8e7d6"
     results[2][:running].should eq 0
 
     # an executable the build service didn't name is reported as is
-    results[3][:name].should eq "core-1.#{LEGACY}"
-    results[3][:driver].should eq LEGACY
+    results[3][:name].should eq LEGACY
+    results[3][:hostname].should eq "core-1"
     results[3][:commit].should eq ""
     results[3][:running].should eq 1
 
-    # a process on an edge is named for the edge, not the node reporting it.
-    # EDGE_A is attached to both core nodes yet appears once
+    # a process on an edge is reported against the edge, not the node reporting
+    # it. EDGE_A is attached to both core nodes yet appears once, and the same
+    # driver on two hosts keeps the same name
     results[4..].map { |result| {result[:name], result[:hostname], result[:running]} }.should eq [
-      {"#{EDGE_A}.drivers_place_demo_display", EDGE_A, 1}, # on an edge, using memory
-      {"#{EDGE_A}.drivers_place_kiosk", EDGE_A, 0},        # on an edge, using no memory
-      {"#{EDGE_B}.drivers_place_kiosk", EDGE_B, 1},        # a second edge of the same node
+      {"drivers_place_demo_display", EDGE_A, 1}, # on an edge, using memory
+      {"drivers_place_kiosk", EDGE_A, 0},        # on an edge, using no memory
+      {"drivers_place_kiosk", EDGE_B, 1},        # a second edge of the same node
     ]
 
     # each result is stamped with when it was checked
@@ -173,6 +174,7 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
     status[:driver_count].should eq 7
     status[:running_count].should eq 4
 
+    # not running processes are identified by host as well as driver
     Array(String).from_json(status[:not_running].to_json).should eq [
       "core-0.drivers_place_bookings",
       "core-1.drivers_place_router",
@@ -208,10 +210,10 @@ DriverSpecs.mock_driver "Place::DriverHealth" do
     results = Array(DriverState)
       .from_json exec(:check_drivers).get.not_nil!.to_json
 
-    results.map(&.[](:name)).should eq [
-      "core-0.drivers_place_bookings",
-      "core-0.drivers_place_demo_display",
-      "#{EDGE_A}.drivers_place_kiosk",
+    results.map { |result| {result[:hostname], result[:name]} }.should eq [
+      {"core-0", "drivers_place_bookings"},
+      {"core-0", "drivers_place_demo_display"},
+      {EDGE_A, "drivers_place_kiosk"},
     ]
 
     Array(String).from_json(status[:unreachable_clusters].to_json).should eq [CORE_2_ID]

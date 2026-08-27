@@ -44,15 +44,13 @@ class Place::DriverHealth < PlaceOS::Driver
   struct DriverState
     include JSON::Serializable
 
-    # `<hostname>.<driver>`, unique across the cluster
+    # the driver source path, i.e. `drivers_place_bookings`. unique per
+    # `hostname`, the same driver runs on many nodes
     getter name : String
 
     # the core node the driver process is on, i.e. `core-0`, or the id of the
     # edge it's on, i.e. `edge-KjO683qopP`
     getter hostname : String
-
-    # the driver source path, i.e. `drivers_place_bookings`
-    getter driver : String
 
     # the short commit hash the driver was built from, i.e. `4894a36`
     getter commit : String
@@ -66,13 +64,17 @@ class Place::DriverHealth < PlaceOS::Driver
 
     def initialize(@hostname, executable : String, @running, @timestamp)
       if match = EXECUTABLE_NAME.match(executable)
-        @driver = match["driver"]
+        @name = match["driver"]
         @commit = match["commit"]
       else
-        @driver = executable
+        @name = executable
         @commit = ""
       end
-      @name = "#{@hostname}.#{@driver}"
+    end
+
+    # identifies the process in the cluster, `<hostname>.<name>`
+    def process : String
+      "#{hostname}.#{name}"
     end
   end
 
@@ -120,15 +122,16 @@ class Place::DriverHealth < PlaceOS::Driver
       end
     end
 
-    drivers.sort_by!(&.name)
+    drivers.sort_by!(&.process)
 
     # an edge attached to more than one core node would be reported by each
-    drivers.uniq!(&.name)
-    not_running = drivers.select(&.running.zero?).map(&.name)
+    drivers.uniq!(&.process)
+    not_running = drivers.select(&.running.zero?).map(&.process)
 
     self[:clusters] = clusters
     self[:unreachable_clusters] = unreachable
-    # exposed as InfluxDB tags so each driver process is its own series
+    # exposed as InfluxDB tags so each driver process is its own series, with
+    # the same driver comparable across nodes
     self[:drivers] = {
       value:       drivers,
       ts_hint:     "complex",
