@@ -140,6 +140,7 @@ class Place::DriverHealth < PlaceOS::Driver
     self[:driver_count] = drivers.size
     self[:running_count] = drivers.size - not_running.size
     self[:not_running] = not_running
+    self[:not_running_count] = not_running.size
     self[:last_checked] = Time.utc.to_unix
 
     drivers
