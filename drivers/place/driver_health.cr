@@ -179,7 +179,13 @@ class Place::DriverHealth < PlaceOS::Driver
 
   # a driver process that isn't using any memory isn't running
   protected def running(status : PlaceOS::Core::Client::DriverStatus::Metadata?) : Int32
-    (status.try(&.memory_usage) || 0_i64).zero? ? 0 : 1
+    return 0 unless status
+
+    # no module instances expected to be running
+    return 1 if status.module_instances.zero?
+
+    # otherwise ensure memory usage is reported to determine if a process is running
+    (status.memory_usage || 0_i64).zero? ? 0 : 1
   end
 
   # the configured nodes, otherwise the nodes registered in the cluster
